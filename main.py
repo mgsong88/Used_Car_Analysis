@@ -6,17 +6,18 @@ import sklearn as skl
 from sklearn import metrics
 from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
 from sklearn.model_selection import GridSearchCV
-from xgboost import XGBClassifier
+from xgboost import XGBRegressor, XGBClassifier
 from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
-from sklearn.linear_model import LogisticRegression
+from sklearn.linear_model import LogisticRegression, RidgeCV
 import time
 
 # Assume that main.py is in same location as the Test and Train .csv files
 if __name__ == '__main__':
-    def cleanData(data, type) :
+    def cleanData(data, type, target) :
         # data = dataframe containing Training Data or Test Data
         # type = "Training" or "Test"
+        # target = "Trim" or "Price"
 
         # First thing to do is look at our data for simple cleaning.
         # Not all of these variables are useful or easy to interpret in a model.
@@ -166,58 +167,77 @@ if __name__ == '__main__':
         # We also won't use the Selling Price since it's implied that we can only use the other 26 variables.
         # Only do this on the Test Data
         if type == "Training" :
-            data_Trim = data.dropna(subset = ["Vehicle_Trim"]).copy()
-            data_Trim.drop(columns = "Dealer_Listing_Price", inplace = True) #NOTE: NEED TO CHANGE THIS CODE SO WE HAVE THIS VALUE FOR THE PRICE PART OF THIS TASK!
+            if target == "Trim" : #If looking for Trim, drop the Dealer Price column
+                data_Trim = data.dropna(subset = ["Vehicle_Trim"]).copy()
+                data_Trim.drop(columns="Dealer_Listing_Price", inplace=True)
 
-            # I notice that Trims are by Vehicle Make. Cadillacs have specific Trims, and Jeeps have others. So, build two models.
-            # For Cadillacs, the Trims can be grouped into: Base, Luxury, Platinum, Premium
-            # For Jeeps, the Trims are: Laredo, Altitude, Limited, Overland, SRT, Summit, Trailhawk, Trackhawk, Upland, Sterling.
-            #   Google tells me that the 75th Anniversary is a Laredo model: https://www.thebestchrysler.com/grand-cherokee-trim-levels-explained/
-            #   Wikipedia Link says that:
-            #   Upland -> Laredo
-            #   Sterling -> Limited
-            #   Trackhawk -> SRT
+                # I notice that Trims are by Vehicle Make. Cadillacs have specific Trims, and Jeeps have others. So, build two models.
+                # For Cadillacs, the Trims can be grouped into: Base, Luxury, Platinum, Premium
+                # For Jeeps, the Trims are: Laredo, Altitude, Limited, Overland, SRT, Summit, Trailhawk, Trackhawk, Upland, Sterling.
+                #   Google tells me that the 75th Anniversary is a Laredo model: https://www.thebestchrysler.com/grand-cherokee-trim-levels-explained/
+                #   Wikipedia Link says that:
+                #   Upland -> Laredo
+                #   Sterling -> Limited
+                #   Trackhawk -> SRT
+                def parseTrim(df) :
+                    df["Vehicle_Trim"] = df["Vehicle_Trim"].str.upper()
+                    cadillacTrims = ["PREMIUM", "PLATINUM", "LUXURY"] #"Premium Luxury" Trim existing means we need to replace "Premium" first!
+                    for c in cadillacTrims :
+                        df.loc[df["Vehicle_Trim"].str.contains(c, na=False), "Vehicle_Trim"] = c
+                    df.loc[df["Vehicle_Trim"].str.contains("FWD", na=False), "Vehicle_Trim"] = "BASE"
+                    jeepTrims = ["LAREDO", "ALTITUDE", "LIMITED", "OVERLAND", "SRT", "SUMMIT", "TRAILHAWK"]
+                    for j in jeepTrims :
+                        df.loc[df["Vehicle_Trim"].str.contains(j, na=False), "Vehicle_Trim"] = j
+                    df.loc[df["Vehicle_Trim"].str.contains("ANNIVERSARY", na=False), "Vehicle_Trim"] = "LAREDO"
+                    df.loc[df["Vehicle_Trim"].str.contains("UPLAND", na=False), "Vehicle_Trim"] = "LAREDO"
+                    df.loc[df["Vehicle_Trim"].str.contains("STERLING", na=False), "Vehicle_Trim"] = "LIMITED"
+                    df.loc[df["Vehicle_Trim"].str.contains("TRACKHAWK", na=False), "Vehicle_Trim"] = "SRT"
+                    return df
+                data = parseTrim(data_Trim)
 
-            def parseTrim(df) :
-                df["Vehicle_Trim"] = df["Vehicle_Trim"].str.upper()
-                cadillacTrims = ["PREMIUM", "PLATINUM", "LUXURY"] #"Premium Luxury" Trim existing means we need to replace "Premium" first!
-                for c in cadillacTrims :
-                    df.loc[df["Vehicle_Trim"].str.contains(c, na=False), "Vehicle_Trim"] = c
-                df.loc[df["Vehicle_Trim"].str.contains("FWD", na=False), "Vehicle_Trim"] = "BASE"
-                jeepTrims = ["LAREDO", "ALTITUDE", "LIMITED", "OVERLAND", "SRT", "SUMMIT", "TRAILHAWK"]
-                for j in jeepTrims :
-                    df.loc[df["Vehicle_Trim"].str.contains(j, na=False), "Vehicle_Trim"] = j
-                df.loc[df["Vehicle_Trim"].str.contains("ANNIVERSARY", na=False), "Vehicle_Trim"] = "LAREDO"
-                df.loc[df["Vehicle_Trim"].str.contains("UPLAND", na=False), "Vehicle_Trim"] = "LAREDO"
-                df.loc[df["Vehicle_Trim"].str.contains("STERLING", na=False), "Vehicle_Trim"] = "LIMITED"
-                df.loc[df["Vehicle_Trim"].str.contains("TRACKHAWK", na=False), "Vehicle_Trim"] = "SRT"
-                return df
-            data = parseTrim(data_Trim)
+                # To run our models, we need to get Dummy Variables of the Categorical Variables:
+                #   SellerState, VehColorExt, VehColorInt, VehDriveTrain, VehEngine, VehPriceLabel
+                data_Trim = pd.get_dummies(data_Trim, columns = ["SellerState", "VehColorExt", "VehColorInt",
+                                                                 "VehDriveTrain", "VehEngine",
+                                                                 "VehPriceLabel"], drop_first = True)
 
-            # To run our models, we need to get Dummy Variables of the Categorical Variables:
-            #   SellerState, VehColorExt, VehColorInt, VehDriveTrain, VehEngine, VehPriceLabel
-            data_Trim = pd.get_dummies(data_Trim, columns = ["SellerState", "VehColorExt", "VehColorInt",
-                                                             "VehDriveTrain", "VehEngine",
-                                                             "VehPriceLabel"], drop_first = True)
+                # Now, let's split the data into Jeeps and Cadillacs for two separate models.
+                jeepTrim = data_Trim[data_Trim["VehMake"] == "Jeep"].copy()
+                jeepTrim.drop(columns = "VehMake", inplace = True)
+                cadillacTrim = data_Trim[data_Trim["VehMake"] == "Cadillac"].copy()
+                cadillacTrim.drop(columns = "VehMake", inplace = True)
+                return jeepTrim, cadillacTrim
 
-            # Now, let's split the data into Jeeps and Cadillacs for two separate models.
-            jeepTrim = data_Trim[data_Trim["VehMake"] == "Jeep"].copy()
-            jeepTrim.drop(columns = "VehMake", inplace = True)
-            cadillacTrim = data_Trim[data_Trim["VehMake"] == "Cadillac"].copy()
-            cadillacTrim.drop(columns = "VehMake", inplace = True)
-            return jeepTrim, cadillacTrim
+            else :
+                data_Price = data.dropna(subset = ["Dealer_Listing_Price"]).copy() #Drop NA's in Price
+                data_Price.drop(columns = "Vehicle_Trim", inplace = True) #Don't use Trim
+                data_Price = pd.get_dummies(data_Price, columns = ["SellerState", "VehColorExt",
+                                                                   "VehColorInt", "VehDriveTrain",
+                                                                   "VehEngine", "VehPriceLabel"], drop_first = True)
+                data_Price["isJeep"] = data_Price["VehMake"] == "Jeep" #Convert VehMake into Boolean isJeep
+                data_Price.insert(data_Price.columns.get_loc("VehMake") + 1, "isJeep", data_Price.pop("isJeep"))
+                data_Price.drop(columns=["VehMake"], inplace = True)
+                return data_Price
 
         else :
-            data = pd.get_dummies(data, columns = ["SellerState", "VehColorExt", "VehColorInt", "VehDriveTrain",
-                                                   "VehEngine", "VehPriceLabel"], drop_first = True)
-            jeepTrim = data[data["VehMake"] == "Jeep"].copy()
-            jeepTrim.drop(columns = "VehMake", inplace = True)
-            cadillacTrim = data[data["VehMake"] == "Cadillac"].copy()
-            cadillacTrim.drop(columns = "VehMake", inplace = True)
-            return jeepTrim, cadillacTrim
+            if target == "Trim" :
+                data = pd.get_dummies(data, columns = ["SellerState", "VehColorExt", "VehColorInt", "VehDriveTrain",
+                                                       "VehEngine", "VehPriceLabel"], drop_first = True)
+                jeepTrim = data[data["VehMake"] == "Jeep"].copy()
+                jeepTrim.drop(columns = "VehMake", inplace = True)
+                cadillacTrim = data[data["VehMake"] == "Cadillac"].copy()
+                cadillacTrim.drop(columns = "VehMake", inplace = True)
+                return jeepTrim, cadillacTrim
+            else :
+                data_Price = pd.get_dummies(data, columns=["SellerState", "VehColorExt", "VehColorInt", "VehDriveTrain",
+                                                           "VehEngine", "VehPriceLabel"], drop_first=True)
+                data_Price["isJeep"] = data_Price["VehMake"] == "Jeep"  # Convert VehMake into Boolean isJeep
+                data_Price.insert(data_Price.columns.get_loc("VehMake") + 1, "isJeep", data_Price.pop("isJeep"))
+                data_Price.drop(columns = ["VehMake"], inplace = True)
+                return data_Price
 
     trainData = pd.read_csv(os.path.join(os.getcwd(), "Training_Dataset.csv"))  # Load in Training Dataset
-    jeepTrain, cadillacTrain = cleanData(trainData, "Training")
+    jeepTrain, cadillacTrain = cleanData(trainData, "Training", "Trim")
 
     ################## RUN VEHICLE_TRIM CLASSIFICATION #####################
 
@@ -240,6 +260,8 @@ if __name__ == '__main__':
         rf_predict = grid_rf_model.predict(test_x)
         accuracy = (rf_predict == test_y).sum() / len(test_y)
         print("Accuracy: " + str(accuracy))
+        rf_predict_prob = grid_rf_model.predict_proba(test_x)
+        print("ROC AUC: " + str(metrics.roc_auc_score(test_y, rf_predict_prob, multi_class='ovr', average='weighted')))
         print("Best Parameters: ", grid_rf_model.best_params_)
 
         return grid_rf_model
@@ -261,7 +283,7 @@ if __name__ == '__main__':
         # param_grid = {'n_estimators': [100, 200, 300, 400, 500], 'max_depth' : [3, 5, 7, 10]}
         param_grid = {'n_estimators': [100, 150, 200], 'max_depth' : [1, 3, 5]}
         xgb_model = XGBClassifier(random_state = 322)
-        grid_xgb_model = GridSearchCV(xgb_model, param_grid, cv = 10, n_jobs = 4)
+        grid_xgb_model = GridSearchCV(xgb_model, param_grid, cv = 10, n_jobs = 4, scoring = 'roc_auc_ovr') #multiclass one-versus-rest ROC AUC, inspired by instructions
         grid_xgb_model.fit(train_x, train_y)
         print("Done with XGBoost Grid Search")
         end_rf = time.time()
@@ -269,6 +291,8 @@ if __name__ == '__main__':
         xgb_predict = grid_xgb_model.predict(test_x)
         accuracy = (xgb_predict == test_y).sum() / len(test_y)
         print("Accuracy: " + str(accuracy))
+        xgb_predict_prob = grid_xgb_model.predict_proba(test_x)
+        print("ROC AUC: " + str(metrics.roc_auc_score(test_y, xgb_predict_prob, multi_class = 'ovr', average = 'weighted')))
         print("Best Parameters: ", grid_xgb_model.best_params_)
 
         # Some legacy ConfusionMatrix Code could use in the future
@@ -297,16 +321,17 @@ if __name__ == '__main__':
         print(time.strftime("%Hh%Mm%Ss", time.gmtime(end_rf - start_rf)))
         prediction = lr.predict(test_x)
         accuracy = (prediction == test_y).sum() / len(test_y)
+        lr_predict_prob = lr.predict_proba(test_x)
+        print("ROC AUC: " + str(metrics.roc_auc_score(test_y, lr_predict_prob, multi_class='ovr', average='weighted')))
         print("Multinomial Logistic Regression Accuracy: " + str(accuracy))
-
         return lr
 
     jeepLR = lrModel(jeepTrain, "Jeep")
     cadillacLR = lrModel(cadillacTrain, "Cadillac")
 
-    # It turns out that XGBoost provides the best performance, so we use those models to predict the test values.
+    # It turns out that XGBoost provides the best performance both in Accuracy and AUC_ROC, so we use those models to predict the test values.
     testData = pd.read_csv(os.path.join(os.getcwd(), "Test_Dataset.csv"))  # Load in Training Dataset
-    jeepTest, cadillacTest = cleanData(testData, "Test")
+    jeepTest, cadillacTest = cleanData(testData, "Test", "Trim")
 
     jeepID = jeepTest.pop("ListingID")
     cadillacID = cadillacTest.pop("ListingID")
@@ -349,5 +374,97 @@ if __name__ == '__main__':
     # DONE WITH CLASSIFICATION TASK
 
     ################## RUN DEALER_LISTING_PRICE #####################
+    trainData = pd.read_csv(os.path.join(os.getcwd(), "Training_Dataset.csv"))  # Load in Training Dataset
+    priceData = cleanData(trainData, "Training", "Price")
 
-    # Clean up code, leave comments and summarize into 500 words and submit by ~noon on Thurs.
+    def rfModel2(df):
+        df = df.copy()  # avoids changing the actual underlying dataset
+        vehicle_y = df.pop("Dealer_Listing_Price")
+        start_rf = time.time()
+        print(type)
+        print("Starting Random Forest Grid Search")
+        train_x, test_x, train_y, test_y = skl.model_selection.train_test_split(df, vehicle_y, test_size=0.2,
+                                                                                random_state=322)
+        param_grid = {'n_estimators': [100, 150, 200], 'max_depth': [10, 25, 50]}  # RF typically gets better with more # of trees.
+        rf_model = RandomForestRegressor(random_state=322)
+        grid_rf_model = GridSearchCV(rf_model, param_grid, cv=10, n_jobs=4, scoring="r2")
+        grid_rf_model.fit(train_x, train_y)
+        print("Done with Random Forest Grid Search")
+        end_rf = time.time()
+        print(time.strftime("%Hh%Mm%Ss", time.gmtime(end_rf - start_rf))) #4 mins
+        rf_predict = grid_rf_model.predict(test_x)
+        print('Random Forest R^2: ' + str(metrics.r2_score(test_y, rf_predict))) #R^2 is 0.7769
+        print("Best Parameters: " + str(grid_rf_model.best_params_))
+        return grid_rf_model
+    priceRF = rfModel2(priceData)
+    def xgbModel2(df) :
+        df = df.copy()  # avoids changing the actual underlying dataset
+        vehicle_y = df.pop("Dealer_Listing_Price")
+        start_rf = time.time()
+        print(type)
+        print("Starting XGBoost Grid Search")
+        train_x, test_x, train_y, test_y = skl.model_selection.train_test_split(df, vehicle_y, test_size=0.2,
+                                                                                random_state=322)
+        # param_grid = {'n_estimators': [100, 200, 300, 400, 500], 'max_depth' : [3, 5, 7, 10]}
+        param_grid = {'n_estimators': [25, 50, 100, 150], 'max_depth': [1, 3, 5, 7, 10]}
+        xgb_model = XGBRegressor(random_state=322)
+        grid_xgb_model = GridSearchCV(xgb_model, param_grid, cv=10, n_jobs=4) #Default is R^2
+        grid_xgb_model.fit(train_x, train_y)
+        print("Done with XGBoost Grid Search")
+        end_rf = time.time()
+        print(time.strftime("%Hh%Mm%Ss", time.gmtime(end_rf - start_rf)))
+        xgb_predict = grid_xgb_model.predict(test_x)
+        print("XGBoost R^2: " + str(metrics.r2_score(test_y, xgb_predict))) #R^2 is 0.7621
+        print("Best Parameters: " + str(grid_xgb_model.best_params_))
+        return grid_xgb_model
+    priceXGB = xgbModel2(priceData)
+
+    # Running a Linear Regression, could consider doing log transform of Dealer_Listing_Price since it's a price to test alternative.
+    def rrModel(df) :
+        df = df.copy()
+        vehicle_y = df.pop("Dealer_Listing_Price")
+        start_rf = time.time()
+        print(type)
+        print("Starting Regression")
+        train_x, test_x, train_y, test_y = skl.model_selection.train_test_split(df, vehicle_y, test_size = 0.2, random_state = 322)
+        reg = RidgeCV(alphas=[0.01, 0.1, 1, 10, 100], scoring = 'r2', cv = 10)
+        reg.fit(train_x, train_y)
+        print("Done with Regression")
+        end_rf = time.time()
+        print(time.strftime("%Hh%Mm%Ss", time.gmtime(end_rf - start_rf)))
+        rr_predict = reg.predict(test_x)
+        print('Regression R^2: ' + str(metrics.r2_score(test_y, rr_predict))) #R^2 is 0.6839
+        print("Best Parameters: Alpha = " + str(reg.alpha_))
+        return rr_predict
+    priceRR = rrModel(priceData)
+
+    # It turns out that Random Forest provides the best performance in terms of R^2, so we use it on test.
+    testData = pd.read_csv(os.path.join(os.getcwd(), "Test_Dataset.csv"))  # Load in Training Dataset
+    priceTest = cleanData(testData, "Test", "Price")
+
+    priceID = priceTest.pop("ListingID")
+
+    # priceTest might not have all the Dummy Variables.
+    test_cols = priceTest.columns
+    train_cols = priceData.columns
+    set(test_cols) - set(train_cols)  # empty; all Train columns are in Test
+    missing = list(set(train_cols) - set(test_cols))  # there's some train columns not in test.
+    missing.remove("Dealer_Listing_Price")
+    for m in missing:
+        priceTest[m] = False  # All missing are Booleans
+
+    colOrder = train_cols.to_list()
+    colOrder.remove("Dealer_Listing_Price")
+
+    priceTest = priceTest[colOrder]
+    priceOut = pd.Series(priceRF.predict(priceTest), name="Dealer_Listing_Price")
+
+    priceID = priceID.reset_index(drop = True)
+    priceOut = priceOut.reset_index(drop = True)
+    priceConcat = pd.concat([priceID, priceOut], axis = 1)
+    priceOut = priceConcat.sort_values(["ListingID"], ascending = True).reset_index(drop = True)
+
+    ################### FINAL OUTPUT ###################
+    finalOut = trimOut.merge(priceOut, how = "outer", on = "ListingID", validate = "1:1")
+    finalOut = finalOut.sort_values(["ListingID"], ascending = True).reset_index(drop = True)
+    finalOut.to_csv("Test_Output.csv", index = False)
